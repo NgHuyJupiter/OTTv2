@@ -23,7 +23,14 @@ let gameState = {
 // Socket.io connection handler
 io.on('connection', (socket) => {
   console.log(`New connection: ${socket.id}`);
-  
+
+  // Reject extra connections once both seats are taken
+  if (Object.keys(gameState.players).length >= 2) {
+    socket.emit('gameFull');
+    socket.disconnect(true);
+    return;
+  }
+
   // Assign player color (red goes first)
   const playerColor = Object.keys(gameState.players).length === 0 ? 'red' : 'blue';
   gameState.players[socket.id] = { color: playerColor, ready: false };
@@ -42,39 +49,42 @@ io.on('connection', (socket) => {
   socket.on('ready', () => {
     gameState.players[socket.id].ready = true;
     
-    // Check if both players are ready
-    const playersReady = Object.values(gameState.players).every(p => p.ready);
+    // Check if both players are present and ready
+    const playersReady = Object.keys(gameState.players).length === 2 &&
+      Object.values(gameState.players).every(p => p.ready);
     if (playersReady && !gameState.gameStarted) {
       startGame();
     }
   });
-  
+
   // Handle piece placement
   socket.on('placePiece', ({ row, col, pieceType }) => {
     if (gameState.placementPhase && gameState.players[socket.id].color === gameState.currentTurn) {
-      // Validate placement position (must be in home territory)
-      if (isValidPlacement(row, col, gameState.players[socket.id].color)) {
+      // Validate placement position (must be in home territory) and that the cell is empty
+      if (isValidPlacement(row, col, gameState.players[socket.id].color) && !gameState.board[row][col]) {
         gameState.board[row][col] = { type: pieceType, color: gameState.players[socket.id].color };
         io.emit('updateBoard', gameState.board);
-        
+
         // Switch turn after placement
         gameState.currentTurn = gameState.currentTurn === 'red' ? 'blue' : 'red';
         io.emit('turnChange', gameState.currentTurn);
       }
     }
   });
-  
+
   // Handle piece movement
   socket.on('movePiece', ({ fromRow, fromCol, toRow, toCol }) => {
     if (!gameState.placementPhase && gameState.players[socket.id].color === gameState.currentTurn) {
       // Validate move and update game state
       if (isValidMove(fromRow, fromCol, toRow, toCol, gameState.players[socket.id].color)) {
         // Handle piece capture and victory conditions
-        handleMove(fromRow, fromCol, toRow, toCol);
-        
-        // Switch turn after move
-        gameState.currentTurn = gameState.currentTurn === 'red' ? 'blue' : 'red';
-        io.emit('turnChange', gameState.currentTurn);
+        const moved = handleMove(fromRow, fromCol, toRow, toCol);
+
+        // Switch turn only if the move actually happened
+        if (moved) {
+          gameState.currentTurn = gameState.currentTurn === 'red' ? 'blue' : 'red';
+          io.emit('turnChange', gameState.currentTurn);
+        }
       }
     }
   });
@@ -105,12 +115,20 @@ function isValidPlacement(row, col, color) {
   }
 }
 
+function isInBounds(row, col) {
+  return row >= 0 && row <= 8 && col >= 0 && col <= 8;
+}
+
 function isValidMove(fromRow, fromCol, toRow, toCol, color) {
-  // Check if move is valid (1 square in any direction)
+  // Check if move is valid (1 square in any direction, actually moving)
+  if (!isInBounds(fromRow, fromCol) || !isInBounds(toRow, toCol)) {
+    return false;
+  }
+
   const rowDiff = Math.abs(toRow - fromRow);
   const colDiff = Math.abs(toCol - fromCol);
-  
-  return (rowDiff <= 1 && colDiff <= 1) && 
+
+  return (rowDiff <= 1 && colDiff <= 1) && (rowDiff + colDiff > 0) &&
          gameState.board[fromRow][fromCol]?.color === color;
 }
 
@@ -118,45 +136,42 @@ function handleMove(fromRow, fromCol, toRow, toCol) {
   // Handle piece movement and capture logic
   const movingPiece = gameState.board[fromRow][fromCol];
   const targetPiece = gameState.board[toRow][toCol];
-  
-  // Check victory conditions
-  if ((toRow === 0 && toCol === 0) || (toRow === 8 && toCol === 8)) {
-    // Piece reached opponent's home base - victory!
-    io.emit('gameOver', { winner: movingPiece.color });
-    resetGame();
-    return;
-  }
-  
-  // Handle piece capture
+
+  // Handle piece capture/blocking
   if (targetPiece) {
+    if (targetPiece.color === movingPiece.color) {
+      // Cannot move onto your own piece
+      return false;
+    }
+
     if (targetPiece.type === movingPiece.type) {
       // Pieces of same type cannot capture each other
-      return;
+      return false;
     }
-    
+
     // Determine winner of the encounter
     const winner = determineWinner(movingPiece.type, targetPiece.type);
-    
+
     if (winner === movingPiece.type) {
       // Moving piece captures target
       gameState.board[toRow][toCol] = movingPiece;
       gameState.board[fromRow][fromCol] = null;
-      
+
       // Check if opponent has any pieces of the captured type left
       if (!hasPiecesOfType(targetPiece.type, targetPiece.color)) {
         io.emit('gameOver', { winner: movingPiece.color });
         resetGame();
-        return;
+        return true;
       }
     } else {
       // Target piece captures moving piece
       gameState.board[fromRow][fromCol] = null;
-      
+
       // Check if player has any pieces of the moving type left
       if (!hasPiecesOfType(movingPiece.type, movingPiece.color)) {
         io.emit('gameOver', { winner: targetPiece.color });
         resetGame();
-        return;
+        return true;
       }
     }
   } else {
@@ -164,8 +179,17 @@ function handleMove(fromRow, fromCol, toRow, toCol) {
     gameState.board[toRow][toCol] = movingPiece;
     gameState.board[fromRow][fromCol] = null;
   }
-  
+
+  // Check victory conditions - reaching the opponent's home corner
+  if ((movingPiece.color === 'red' && toRow === 8 && toCol === 8) ||
+      (movingPiece.color === 'blue' && toRow === 0 && toCol === 0)) {
+    io.emit('gameOver', { winner: movingPiece.color });
+    resetGame();
+    return true;
+  }
+
   io.emit('updateBoard', gameState.board);
+  return true;
 }
 
 function determineWinner(type1, type2) {
@@ -191,6 +215,8 @@ function startGame() {
 }
 
 function resetGame() {
+  const oldTimer = gameState.placementTimer;
+
   gameState = {
     players: {},
     board: Array(9).fill().map(() => Array(9).fill(null)),
@@ -199,10 +225,10 @@ function resetGame() {
     placementTimer: null,
     gameStarted: false
   };
-  
-  if (gameState.placementTimer) {
-    clearTimeout(gameState.placementTimer);
+
+  if (oldTimer) {
+    clearTimeout(oldTimer);
   }
-  
+
   io.emit('resetGame');
 }

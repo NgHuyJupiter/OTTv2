@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let selectedPieceType = null;
   let selectedCell = null;
   let board = Array(9).fill().map(() => Array(9).fill(null));
+  let placementPhase = true;
   
   // Initialize the game board
   const boardElement = document.getElementById('board');
@@ -55,32 +56,36 @@ document.addEventListener('DOMContentLoaded', () => {
     playerColor = color;
     playerColorElement.textContent = `You are: ${color.toUpperCase()}`;
     playerColorElement.style.color = color;
-    
+
+    placementPhase = gameState.placementPhase;
     updateBoard(gameState.board);
-    updateGameStatus(gameState.currentTurn, gameState.placementPhase);
-    
-    if (color === 'blue') {
-      document.querySelector('.piece-selection').style.display = 'none';
-    }
+    updateGameStatus(gameState.currentTurn, placementPhase);
+    updatePlacementUI(gameState.currentTurn, placementPhase);
   });
-  
+
   socket.on('gameStart', ({ currentTurn }) => {
+    placementPhase = true;
     gameStatusElement.textContent = `Placement Phase - ${currentTurn.toUpperCase()}'s turn`;
+    updatePlacementUI(currentTurn, true);
     startTimer(30);
   });
-  
+
   socket.on('placementPhaseEnd', () => {
+    placementPhase = false;
     gameStatusElement.textContent = `Game Started - ${playerColor.toUpperCase()}'s turn`;
-    document.querySelector('.piece-selection').style.display = 'none';
+    selectedPieceType = null;
+    pieceButtons.forEach(btn => btn.classList.remove('selected'));
+    updatePlacementUI(null, false);
   });
-  
+
   socket.on('updateBoard', (newBoard) => {
     board = newBoard;
     renderBoard();
   });
-  
+
   socket.on('turnChange', (currentTurn) => {
-    updateGameStatus(currentTurn, false);
+    updateGameStatus(currentTurn, placementPhase);
+    updatePlacementUI(currentTurn, placementPhase);
   });
   
   socket.on('gameOver', ({ winner }) => {
@@ -96,9 +101,11 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Helper functions
   function handleCellClick(row, col) {
-    if (selectedPieceType) {
+    if (placementPhase && selectedPieceType) {
       // Placement phase
       socket.emit('placePiece', { row, col, pieceType: selectedPieceType });
+      selectedPieceType = null;
+      pieceButtons.forEach(btn => btn.classList.remove('selected'));
     } else if (selectedCell) {
       // Movement phase
       socket.emit('movePiece', { 
@@ -155,7 +162,12 @@ document.addEventListener('DOMContentLoaded', () => {
       gameStatusElement.style.color = '#333';
     }
   }
-  
+
+  function updatePlacementUI(currentTurn, isPlacementPhase) {
+    const pieceSelection = document.querySelector('.piece-selection');
+    pieceSelection.style.display = (isPlacementPhase && currentTurn === playerColor) ? '' : 'none';
+  }
+
   function highlightMoves(row, col) {
     clearHighlights();
     
